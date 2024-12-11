@@ -1,30 +1,22 @@
-// @see https://docs.aircode.io/guide/functions/
-const aircode = require('aircode');
 const OpenAI = require('openai');
-const { create, insertMultiple, searchVector } = require('@orama/orama');
-const tokenizer = require('gpt-3-encoder');
 const { OpenAIStream } = require('ai');
+const db = require('./db');
 
 const MAX_CONTEXT_TOKEN = 1500;
-const PagesTable = aircode.db.table('pages');
 
-module.exports = async function (params, context) {
+async function handleAsk(req, res) {
   if (!process.env.OPENAI_API_KEY) {
-    console.log('Missing environment variable OPENAI_API_KEY. Abort.');
-    context.status(400);
-    return {
-      error:
-        'You are missing some params, please open AirCode and find the details in Logs section',
-    };
+    return res.status(400).json({
+      error: 'Missing OPENAI_API_KEY environment variable',
+    });
   }
 
-  if (!params.question) {
-    console.log('Missing param `question`. Abort.');
-    context.status(400);
-    return {
-      error:
-        'You are missing some params, please open AirCode and find the details in Logs section',
-    };
+  const { question, project = 'default' } = req.body;
+
+  if (!question) {
+    return res.status(400).json({
+      error: 'Missing question parameter',
+    });
   }
 
   try {
@@ -33,67 +25,37 @@ module.exports = async function (params, context) {
     });
 
     // Moderate the content
-    const question = params.question.trim();
     const { results: moderationRes } = await openai.moderations.create({
-      input: question,
+      input: question.trim(),
     });
+
     if (moderationRes[0].flagged) {
-      console.log('The user input contains flagged content.', moderationRes[0].categories);
-      context.status(403);
-      return {
+      return res.status(403).json({
         error: 'Question input didn\'t meet the moderation criteria.',
         categories: moderationRes[0].categories,
-      };
+      });
     }
 
     // Create embedding from the question
-    const { data: [ { embedding }] } = await openai.embeddings.create({
+    const { data: [{ embedding }] } = await openai.embeddings.create({
       model: 'text-embedding-ada-002',
       input: question.replace(/\n/g, ' '),
     });
-    
-    // Get all pages
-    const { project = 'default' } = params;
-    const pages = await PagesTable
-      .where({ project })
-      .projection({ path: 1, title: 1, content: 1, embedding: 1, _id: 0 })
-      .find();
 
-    // Search vectors to generate context
-    const memDB = await create({
-      schema: {
-        path: 'string',
-        title: 'string',
-        content: 'string',
-        embedding: 'vector[1536]',
-      },
-    });
-    await insertMultiple(memDB, pages);
+    // Search similar vectors using cosine similarity
+    const result = await db.query(
+      `SELECT content FROM pages 
+       WHERE project = $1 
+       ORDER BY embedding <=> $2 
+       LIMIT 10`,
+      [project, embedding]
+    );
 
-    const { hits } = await searchVector(memDB, {
-      vector: embedding,
-      property: 'embedding',
-      similarity: 0.8,  // Minimum similarity. Defaults to `0.8`
-      limit: 10,        // Defaults to `10`
-      offset: 0,        // Defaults to `0`
-    });
+    let contextSections = result.rows
+      .map(row => `${row.content.trim()}\n---\n`)
+      .join('');
 
-    let tokenCount = 0;
-    let contextSections = '';
-
-    for (let i = 0; i < hits.length; i += 1) {
-      const { content } = hits[i].document;
-      const encoded = tokenizer.encode(content);
-      tokenCount += encoded.length;
-
-      if (tokenCount >= MAX_CONTEXT_TOKEN && contextSections !== '') {
-        break;
-      }
-
-      contextSections += `${content.trim()}\n---\n`;
-    }
-
-    // Ask gpt
+    // Ask GPT
     const prompt = `You are a very kindly assistant who loves to help people. Given the following sections from documatation, answer the question using only that information, outputted in markdown format. If you are unsure and the answer is not explicitly written in the documentation, say "Sorry, I don't know how to help with that." Always trying to anwser in the spoken language of the questioner.
 
 Context sections:
@@ -102,29 +64,24 @@ ${contextSections}
 Question:
 ${question}
 
-Answer as markdown (including related code snippets if available):`
-
-    const messages = [{
-      role: 'user',
-      content: prompt,
-    }];
+Answer as markdown (including related code snippets if available):`;
 
     const response = await openai.chat.completions.create({
-      messages,
+      messages: [{ role: 'user', content: prompt }],
       model: 'gpt-3.5-turbo',
       max_tokens: 512,
       temperature: 0.4,
       stream: true,
-    })
+    });
 
-    // Transform the response into a readable stream
     const stream = OpenAIStream(response);
-    return stream;
+    return stream.pipe(res);
   } catch (error) {
     console.error(error);
-    context.status(500);
-    return {
-      error: 'Failed to generate anwser.',
-    };
+    return res.status(500).json({
+      error: 'Failed to generate answer.',
+    });
   }
 }
+
+module.exports = handleAsk;

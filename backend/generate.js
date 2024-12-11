@@ -1,14 +1,14 @@
 // @see https://docs.aircode.io/guide/functions/
-const aircode = require('aircode');
 const OpenAI = require('openai');
-
-const PagesTable = aircode.db.table('pages');
+const db = require('./db');
 
 async function generateEmbeddings(project) {
   // Find all the pages without embeddings
-  const pages = await PagesTable
-    .where({ project, embedding: null })
-    .find();
+  const result = await db.query(
+    'SELECT * FROM pages WHERE project = $1 AND embedding IS NULL',
+    [project]
+  );
+  const pages = result.rows;
 
   if (!pages || pages.length === 0) {
     return { ok: 1 };
@@ -27,13 +27,12 @@ async function generateEmbeddings(project) {
       input,
     });
 
-    const updatedPage = pages.map((page, index) => ({
-      _id: page._id,
-      embedding: data[index].embedding,
-    }));
-
-    for (let i = 0; i < updatedPage.length; i += 100) {
-      await PagesTable.save(updatedPage.slice(i, i + 100));
+    // Update embeddings in batches
+    for (let i = 0; i < pages.length; i++) {
+      await db.query(
+        'UPDATE pages SET embedding = $1 WHERE id = $2',
+        [data[i].embedding, pages[i].id]
+      );
     }
   
     return { ok: 1 };

@@ -1,12 +1,9 @@
-// @see https://docs.aircode.io/guide/functions/
-const aircode = require('aircode');
 const crypto = require('crypto');
 const tokenizer = require('gpt-3-encoder');
 const { generateEmbeddings } = require('./generate');
+const db = require('./db');
 
 const MAX_TOKEN_PER_CHUNK = 8191;
-
-const PagesTable = aircode.db.table('pages');
 
 // Split the page content into chunks base on the MAX_TOKEN_PER_CHUNK
 function getContentChunks(content) {
@@ -23,86 +20,65 @@ function getContentChunks(content) {
   return tokenChunks.map(tokens => tokenizer.decode(tokens));
 }
 
-module.exports = async function(params, context) {
+async function handleUpload(req, res) {
   if (!process.env.OPENAI_API_KEY) {
-    console.log('Missing environment variable OPENAI_API_KEY. Abort.');
-    context.status(400);
-    return {
-      error: 'You are missing some params, please open AirCode and find the details in Logs section',
-    };
+    return res.status(400).json({
+      error: 'Missing OPENAI_API_KEY environment variable',
+    });
   }
 
-  const { operation, project = 'default' } = params;
+  const { operation, project = 'default', path, title = '', content = '' } = req.body;
 
   if (!['add', 'delete', 'clean', 'generate'].includes(operation)) {
-    console.log(`Operation ${operation} is not supported. Abort.`);
-    context.status(400);
-    return {
-      error: 'You are missing some params, please open AirCode and find the details in Logs section',
-    };
+    return res.status(400).json({
+      error: `Operation ${operation} is not supported`,
+    });
   }
 
   if (operation === 'clean') {
-    // Delete all the stored pages
-    await PagesTable.where({ project }).delete();
-    return { ok: 1 };
+    await db.query('DELETE FROM pages WHERE project = $1', [project]);
+    return res.json({ ok: 1 });
   }
 
   if (operation === 'generate') {
     await generateEmbeddings(project);
-    return { ok: 1 };
+    return res.json({ ok: 1 });
   }
-
-  const { path, title = '', content = '' } = params;
 
   if (!path) {
-    console.log('Missing param `path`. Abort.');
-    context.status(400);
-    return {
-      error: 'You are missing some params, please open AirCode and find the details in Logs section',
-    };
+    return res.status(400).json({
+      error: 'Missing path parameter',
+    });
   }
-
-  console.log(`${operation} page with path ${path}`);
 
   if (operation === 'delete') {
-    // Delete single page
-    await PagesTable.where({ project, path }).delete();
-    return { ok: 1 };
+    await db.query('DELETE FROM pages WHERE project = $1 AND path = $2', [project, path]);
+    return res.json({ ok: 1 });
   }
 
-  // Generate checksum for the page, so we can determine if this page is changed
   const checksum = crypto.createHash('md5').update(content).digest('hex');
-  const existed = await PagesTable.where({
-    project,
-    path,
-  }).findOne();
+  const existed = await db.query(
+    'SELECT checksum FROM pages WHERE project = $1 AND path = $2 LIMIT 1',
+    [project, path]
+  );
 
-  if (existed) {
-    if (existed.checksum === checksum) {
-      console.log('This page\'s content is still fresh. Skip regenerating.');
-      return { ok: 1 };
+  if (existed.rows.length > 0) {
+    if (existed.rows[0].checksum === checksum) {
+      return res.json({ ok: 1 });
     } else {
-      // Delete the exist one since we will regenerate it
-      await PagesTable.where({ project, path }).delete();
+      await db.query('DELETE FROM pages WHERE project = $1 AND path = $2', [project, path]);
     }
   }
 
   const chunks = getContentChunks(content);
-  const pagesToSave = chunks.map((chunk, index) => ({
-    project,
-    path,
-    title,
-    checksum,
-    chunkIndex: index,
-    content: chunk,
-    embedding: null,
-  }))
-
-  // Save the result to database
-  for (let i = 0; i < pagesToSave.length; i += 100) {
-    await PagesTable.save(pagesToSave.slice(i, i + 100));
+  for (let i = 0; i < chunks.length; i++) {
+    await db.query(
+      'INSERT INTO pages (project, path, title, checksum, chunk_index, content, embedding) VALUES ($1, $2, $3, $4, $5, $6, NULL)',
+      [project, path, title, checksum, i, chunks[i]]
+    );
   }
 
-  return { ok: 1 };
-};
+  return res.json({ ok: 1 });
+}
+
+module.exports = handleUpload;
