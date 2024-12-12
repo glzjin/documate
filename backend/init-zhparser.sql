@@ -28,7 +28,17 @@ BEGIN
         FROM information_schema.tables
         WHERE table_name = 'pages'
     ) THEN
-        DROP INDEX IF EXISTS pages_content_idx;
+        -- 检查索引是否存在
+        IF EXISTS (
+            SELECT 1
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relname = 'pages_content_idx'
+        ) THEN
+            DROP INDEX pages_content_idx;
+        END IF;
+        
+        -- 创建新的全文搜索索引
         CREATE INDEX pages_content_idx ON pages USING gin(to_tsvector('chinese', content));
     END IF;
 END
