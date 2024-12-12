@@ -201,11 +201,80 @@ async function findSimilarContent(embedding, pathEmbedding, project) {
   }
 }
 
+// 发送 SSE 消息
+function sendSseMessage(res, data) {
+  const message = typeof data === 'string' ? { content: data } : data;
+  res.write(`data: ${JSON.stringify(message)}\n\n`);
+}
+
+// 处理流式响应
+async function handleStreamResponse(res, messages, openai, chatModel) {
+  // 设置 SSE 响应头
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+
+  try {
+    // 创建流式完成
+    const stream = await openai.chat.completions.create({
+      model: chatModel,
+      messages: messages,
+      temperature: 0.7,
+      max_tokens: 1500,
+      stream: true,
+    });
+
+    // 处理每个块
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content || '';
+      if (content) {
+        sendSseMessage(res, {
+          type: 'content',
+          content: content
+        });
+      }
+    }
+
+    // 发送结束信号
+    sendSseMessage(res, {
+      type: 'done'
+    });
+    res.end();
+  } catch (error) {
+    console.error('Stream error:', error);
+    sendSseMessage(res, {
+      type: 'error',
+      error: error.message
+    });
+    res.end();
+  }
+}
+
+// 处理普通响应
+async function handleNormalResponse(res, messages, openai, chatModel) {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: chatModel,
+      messages: messages,
+      temperature: 0.7,
+      max_tokens: 1500,
+    });
+
+    return res.send(completion.choices[0].message.content);
+  } catch (error) {
+    console.error('Error in normal response:', error);
+    return res.status(500).send('处理问题时出错：' + error.message);
+  }
+}
+
 async function handleAsk(req, res) {
   try {
     const { 
       project = 'default',
       question,
+      stream = false,
       chatModel = process.env.OPENAI_CHAT_MODEL || DEFAULT_CHAT_MODEL,
       embeddingModel = process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL
     } = req.body;
@@ -242,7 +311,23 @@ async function handleAsk(req, res) {
     const similarDocs = await findSimilarContent(questionEmbedding, pathQuestionEmbedding, project);
 
     if (similarDocs.length === 0) {
-      return res.send("抱歉，我在文档中没有找到相关的内容。请尝试用其他方式描述你的问题，或者确认相关文档是否已经上传。");
+      const noContentMessage = "抱歉，我在文档中没有找到相关的内容。请尝试用其他方式描述你的问题，或者确认相关文档是否已经上传。";
+      if (stream) {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        });
+        sendSseMessage(res, {
+          type: 'content',
+          content: noContentMessage
+        });
+        sendSseMessage(res, {
+          type: 'done'
+        });
+        return res.end();
+      }
+      return res.send(noContentMessage);
     }
 
     // 准备上下文
@@ -254,7 +339,7 @@ async function handleAsk(req, res) {
     const messages = [
       {
         role: 'system',
-        content: `你是一个专业的文档助手。请基于系统自动检索提供提供的文档内容回答用户问题。
+        content: `你是一个专业的文档助手。请基于提供的文档内容回答用户问题。
 回答要求：
 1. 如果文档中有直接相关的内容，请详细解释
 2. 如果涉及代码，请提供代码示例
@@ -265,24 +350,22 @@ async function handleAsk(req, res) {
       },
       {
         role: 'user',
-        content: `基于以下自动检索提供提供的文档内容回答问题：\n\n${context}\n\n问题：${question}`
+        content: `基于以下文档内容回答问题：\n\n${context}\n\n问题：${question}`
       }
     ];
 
-    // 生成回答
-    const completion = await openai.chat.completions.create({
-      model: chatModel,
-      messages: messages,
-      temperature: 0.7,
-      max_tokens: 1500,
-    });
-
-    // 直接返回回答内容
-    return res.send(completion.choices[0].message.content);
+    // 根据 stream 参数选择响应方式
+    if (stream) {
+      return handleStreamResponse(res, messages, openai, chatModel);
+    } else {
+      return handleNormalResponse(res, messages, openai, chatModel);
+    }
 
   } catch (error) {
     console.error('Error in ask handler:', error);
-    return res.status(500).send('处理问题时出错：' + error.message);
+    if (!res.headersSent) {
+      return res.status(500).send('处理问题时出错：' + error.message);
+    }
   }
 }
 
