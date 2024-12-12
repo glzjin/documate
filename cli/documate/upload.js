@@ -18,8 +18,14 @@ const handleError = (spinnies, name, error) => {
   return;
 }
 
-const uploadFiles = async (uploadUrl, files) => {  
+const uploadFiles = async (uploadUrl, files, token) => {  
   const spinnies = new Spinnies();
+  
+  const requestConfig = token ? {
+    headers: {
+      'Authorization': token
+    }
+  } : {};
   
   spinnies.add('uploading', {
     text: `Uploading files: 0/${files.length}`
@@ -35,8 +41,9 @@ const uploadFiles = async (uploadUrl, files) => {
       await axios.post(uploadUrl, {
         operation: 'add',
         path: file.fileName,
-        content: file.content,
-      });
+        fullPath: file.fullPath,
+        content: file.content
+      }, requestConfig);
 
       uploadedFilesNum += 1;
     }
@@ -51,8 +58,8 @@ const uploadFiles = async (uploadUrl, files) => {
   });
   try {
     await axios.post(uploadUrl, {
-      operation: 'generate',
-    });
+      operation: 'generate'
+    }, requestConfig);
     spinnies.succeed('generating', { text: 'Knowledge base generated.' });
   } catch (error) {
     return handleError(spinnies, 'generating', error);
@@ -67,7 +74,12 @@ const _readFilesFromFileNames = async (rootPath, fileNames) => {
   for (const fileName of fileNames) {
     const content = await fsPromises.readFile(path.join(rootPath, fileName), 'utf8');
     if (content.length !== 0) {
-      results.push({ fileName, content });
+      const fullPath = path.join(rootPath, fileName);
+      results.push({ 
+        fileName,
+        content,
+        fullPath: fullPath
+      });
     }
   }
   return results;
@@ -100,14 +112,21 @@ const upload = async (options) => {
     console.log(`Documate: Couldn't locate documate.json, we will use CLI arguments instead.\n`);
   }
 
-  config.backend = options.backend || config.backend;
+  // 优先从环境变量读取配置
+  config.backend = process.env.DOCUMATE_BACKEND || options.backend || config.backend;
   if (!config.backend) {
-    throw new Error('The parameter `backend` is required.');
+    throw new Error('The parameter `backend` is required. Set it via DOCUMATE_BACKEND environment variable, CLI argument, or documate.json');
   }
-  config.include = options.include || config.include;
-  config.exclude = options.exclude || config.exclude;
-  config.token = options.token || config.token;
-  config.root = options.root || config.root || cwd;
+
+  config.token = process.env.DOCUMATE_TOKEN || options.token || config.token;
+  config.include = process.env.DOCUMATE_INCLUDE || options.include || config.include;
+  config.exclude = process.env.DOCUMATE_EXCLUDE || options.exclude || config.exclude;
+  config.root = process.env.DOCUMATE_ROOT || options.root || config.root || cwd;
+
+  // 如果环境变量中的 exclude 是以逗号分隔的字符串，将其转换为数组
+  if (typeof config.exclude === 'string' && config.exclude.includes(',')) {
+    config.exclude = config.exclude.split(',').map(item => item.trim());
+  }
 
   const files = await readFiles(config);
   await uploadFiles(config.backend, files, config.token);
