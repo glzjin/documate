@@ -335,18 +335,24 @@ async function handleAsk(req, res) {
       return `文件路径: ${doc.fullpath || doc.path}\n内容:\n${doc.content}\n`;
     }).join('\n---\n');
 
-    // 准备提示
-    const messages = [
-      {
-        role: 'system',
-        content: `你是一个专业的文档助手。请基于提供的文档内容回答用户问题。
+    // 构建基础系统提示
+    const baseSystemPrompt = `你是一个专业的文档助手。请基于提供的文档内容回答用户问题。
 回答要求：
 1. 如果文档中有直接相关的内容，请详细解释
 2. 如果涉及代码，请提供代码示例
 3. 如果文档中没有相关信息，请明确说明
 4. 回答要有条理，使用markdown格式
 5. 保持专业性，同时要通俗易懂
-6. 如果内容来自多个文件，请在回答时标注内容的来源文件路径`
+6. 如果内容来自多个文件，请在回答时标注内容的来源文件路径`;
+
+    // 添加额外提示（如果存在）
+    const additionalPrompt = process.env.ADDITIONAL_PROMPT ? `\n${process.env.ADDITIONAL_PROMPT}` : '';
+
+    // 准备提示
+    const messages = [
+      {
+        role: 'system',
+        content: baseSystemPrompt + additionalPrompt
       },
       {
         role: 'user',
